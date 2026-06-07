@@ -172,6 +172,25 @@ def setup_upload_routes(upload_handler):
             except Exception as e:
                 logger.warning(f"Thumbnail generation failed for {file_id}: {e}")
                 # Fall through to the full image.
+        # Defense-in-depth against stored XSS: never serve user-uploaded content
+        # as an active, script-capable type from the app origin. SVG/HTML/XML/JS
+        # are downgraded to an opaque octet-stream (and forced to download) so
+        # they can't execute even if embedded via <object>/<embed>/<iframe>.
+        # Images/PDF/etc. keep their real type for inline preview; Starlette
+        # already marks them as attachments via `filename`.
+        _ACTIVE_MIME = {
+            "text/html", "application/xhtml+xml", "image/svg+xml",
+            "application/xml", "text/xml",
+            "application/javascript", "text/javascript",
+        }
+        if (mime or "").split(";")[0].strip().lower() in _ACTIVE_MIME:
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename=original_name,
+                headers=UPLOAD_RESPONSE_HEADERS,
+                content_disposition_type="attachment",
+            )
         return FileResponse(
             path,
             media_type=mime,

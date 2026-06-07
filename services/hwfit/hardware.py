@@ -27,7 +27,12 @@ def _run(cmd):
             ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no"]
             if _remote_port and _remote_port != "22":
                 ssh_cmd += ["-p", _remote_port]
-            ssh_cmd += [_remote_host, cmd_str]
+            # `--` marks the end of options so a host that begins with "-"
+            # (e.g. "-oProxyCommand=...") can never be parsed by ssh as an
+            # option and executed locally. Route-level validation already
+            # rejects such hosts; this is a structural backstop for any other
+            # caller of detect_system().
+            ssh_cmd += ["--", _remote_host, cmd_str]
             r = subprocess.run(
                 ssh_cmd,
                 capture_output=True, text=True, timeout=15,

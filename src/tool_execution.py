@@ -157,12 +157,23 @@ _SENSITIVE_BASENAMES: set[str] = {
     ".zshrc", ".zprofile", ".zshenv",
     ".profile", ".tcshrc", ".cshrc",
     ".env", ".netrc",
+    # Odysseus' own credential material. DATA_DIR is a default file-tool root
+    # (see _tool_path_roots), so without these an admin agent steered by
+    # prompt-injection could read the password DB, the secret-encryption keys,
+    # or live session tokens. Blocked everywhere, exact-match.
+    ".app_key", ".key", "auth.json", "sessions.json",
 }
 
 _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa",
     "known_hosts",
 )
+
+# SQLite database files are blocked only when they live under DATA_DIR (the
+# app's own DB holds chat history + encrypted secrets). Scoping to DATA_DIR
+# avoids breaking an admin agent that legitimately reads a *.db inside its
+# configured workspace.
+_SENSITIVE_DB_SUFFIXES: tuple[str, ...] = (".db", ".sqlite", ".sqlite3")
 
 
 def _is_sensitive_path(resolved: str) -> bool:
@@ -180,6 +191,19 @@ def _is_sensitive_path(resolved: str) -> bool:
     # Check filename against known sensitive files.
     for pat in _SENSITIVE_FILE_PATTERNS:
         if pat in filenames:
+            return True
+
+    # Block SQLite DB files that live under the app data dir.
+    name = parts[-1].lower() if parts else ""
+    if name.endswith(_SENSITIVE_DB_SUFFIXES):
+        try:
+            from src.constants import DATA_DIR
+            data_root = os.path.realpath(DATA_DIR)
+            if os.path.realpath(resolved).startswith(data_root + os.sep):
+                return True
+        except Exception:
+            # Fail closed: if we can't resolve DATA_DIR, treat DB files as
+            # sensitive rather than risk exposing the app database.
             return True
 
     return False

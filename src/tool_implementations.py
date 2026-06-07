@@ -1043,11 +1043,23 @@ async def do_manage_endpoints(content: str, owner: Optional[str] = None) -> Dict
 
         elif action == "add":
             import uuid as _uuid
+            import os as _os
+            from src.url_safety import check_outbound_url
             name = args.get("name", "")
             base_url = args.get("base_url", "")
             api_key = args.get("api_key", "")
             if not base_url:
                 return {"error": "base_url is required", "exit_code": 1}
+            # SSRF guard: this base_url is fetched server-side later (chat/probe)
+            # with the api_key attached, so a model-supplied (prompt-injectable)
+            # value must not point at the cloud metadata endpoint or use a
+            # non-http(s) scheme. Loopback/LAN stays allowed — local model
+            # servers are the normal case — unless the operator opts into full
+            # lockdown via ENDPOINT_BLOCK_PRIVATE_IPS=true.
+            _block_priv = _os.getenv("ENDPOINT_BLOCK_PRIVATE_IPS", "false").lower() == "true"
+            _ok, _reason = check_outbound_url(base_url, block_private=_block_priv)
+            if not _ok:
+                return {"error": f"Refusing to add endpoint: {_reason}", "exit_code": 1}
             eid = str(_uuid.uuid4())[:8]
             from datetime import datetime
             ep = ModelEndpoint(id=eid, name=name or base_url, base_url=base_url,

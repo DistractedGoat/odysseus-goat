@@ -21,6 +21,15 @@ class APIKeyManager:
             key = Fernet.generate_key()
             with open(self.key_file, 'wb') as f:
                 f.write(key)
+            # Lock the key file down to owner-only. Without this it inherits the
+            # process umask and a co-located user on a shared host could read it
+            # and decrypt api_keys.json. No-op on Windows (relies on the dir
+            # ACL); mirrors src/secret_storage.py.
+            try:
+                from core.platform_compat import safe_chmod
+                safe_chmod(self.key_file, 0o600)
+            except Exception:
+                pass
             return key
     
     def encrypt_api_key(self, api_key: str) -> str:

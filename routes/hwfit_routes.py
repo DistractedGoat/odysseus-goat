@@ -1,7 +1,31 @@
 import re
 from copy import deepcopy
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+
+
+def _admin_remote(request, host, ssh_port):
+    """Gate hwfit hardware probes and sanitize the SSH target.
+
+    Hardware detection over SSH is part of the admin-only model-serving /
+    Cookbook surface (see THREAT_MODEL.md), so require admin first. Then run the
+    user-supplied `host`/`ssh_port` through the same validators Cookbook uses so
+    a value like ``-oProxyCommand=...`` can never reach ``ssh`` as an option and
+    execute locally. Returns the cleaned (host, ssh_port) as strings (`""` when
+    empty), raising 403/400 on rejection.
+
+    Imports are deferred (matching this module's per-route import style) so the
+    module stays importable for the lightweight unit tests that only need
+    ``_apply_manual_hardware`` without the full app dependency stack.
+    """
+    from core.middleware import require_admin
+    from routes.cookbook_helpers import _validate_remote_host, _validate_ssh_port
+
+    require_admin(request)
+    return (
+        _validate_remote_host(host or None) or "",
+        _validate_ssh_port(ssh_port or None) or "",
+    )
 
 
 # Backends the manual hardware simulator accepts. Must stay a subset of what
@@ -101,20 +125,22 @@ def setup_hwfit_routes():
     router = APIRouter(prefix="/api/hwfit", tags=["hwfit"])
 
     @router.get("/system")
-    def get_system(host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False):
+    def get_system(request: Request, host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False):
         """Detect and return current system hardware info. Pass host=user@server for remote.
         fresh=true bypasses the per-host cache (the Rescan button)."""
+        host, ssh_port = _admin_remote(request, host, ssh_port)
         from services.hwfit.hardware import detect_system
         return detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh)
 
     @router.get("/models")
-    def get_models(use_case: str = "", sort: str = "score", limit: int = 50, search: str = "", host: str = "", quant: str = "", ctx: str = "", gpu_count: str = "", gpu_group: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False, fit_only: bool = False):
+    def get_models(request: Request, use_case: str = "", sort: str = "score", limit: int = 50, search: str = "", host: str = "", quant: str = "", ctx: str = "", gpu_count: str = "", gpu_group: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False, fit_only: bool = False):
         """Rank LLM models against detected hardware and return scored results.
         gpu_count: override GPU count (0 = CPU only, 1-N = simulate N GPUs of the
             active group). gpu_group: index into system.gpu_groups (the homogeneous
             pools) to target — empty/auto = the largest pool. vLLM can only
             tensor-parallel across identical GPUs, so we never mix pools.
         fresh=true bypasses the hardware-detection cache."""
+        host, ssh_port = _admin_remote(request, host, ssh_port)
         from services.hwfit.hardware import detect_system
         from services.hwfit.fit import rank_models
         from services.hwfit.models import get_models, model_catalog_path
@@ -200,7 +226,7 @@ def setup_hwfit_routes():
         return {"system": system, "models": results}
 
     @router.get("/profiles")
-    def get_serve_profiles(model: str = "", host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, serve_weights_gb: float = 0.0, serve_quant: str = ""):
+    def get_serve_profiles(request: Request, model: str = "", host: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, serve_weights_gb: float = 0.0, serve_quant: str = ""):
         """Compute llama.cpp serve profiles (Quality/Balanced/Speed) for `model`
         against the detected hardware on `host` (or local). Returns concrete
         flags (n_gpu_layers, n_cpu_moe, cache_type, ctx) the serve UI can apply.
@@ -209,6 +235,7 @@ def setup_hwfit_routes():
         catalog (e.g. an ad-hoc HF repo), pass enough hints via a minimal synthetic
         entry isn't possible here, so we return [] and the UI keeps manual flags.
         """
+        host, ssh_port = _admin_remote(request, host, ssh_port)
         from services.hwfit.hardware import detect_system
         from services.hwfit.models import get_models
         from services.hwfit.profiles import compute_serve_profiles
@@ -258,8 +285,9 @@ def setup_hwfit_routes():
         }
 
     @router.get("/image-models")
-    def get_image_models(sort: str = "fit", search: str = "", host: str = "", gpu_count: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False):
+    def get_image_models(request: Request, sort: str = "fit", search: str = "", host: str = "", gpu_count: str = "", ssh_port: str = "", platform: str = "", fresh: bool = False, manual_mode: str = "", manual_gpu_count: str = "", manual_vram_gb: str = "", manual_ram_gb: str = "", manual_backend: str = "", ignore_detected_gpu: bool = False, ignore_detected_ram: bool = False):
         """Rank image generation models against detected hardware."""
+        host, ssh_port = _admin_remote(request, host, ssh_port)
         from services.hwfit.hardware import detect_system
         from services.hwfit.image_models import rank_image_models
         system = deepcopy(detect_system(host=host, ssh_port=ssh_port, platform=platform, fresh=fresh))

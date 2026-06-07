@@ -1022,10 +1022,12 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         try:
             task = db.query(ScheduledTask).filter(
                 ScheduledTask.id == task_id,
-                ScheduledTask.webhook_token == token,
                 ScheduledTask.status == "active",
             ).first()
-            if not task:
+            # Compare the webhook secret in constant time rather than via the
+            # SQL equality above, so the token check isn't a timing oracle.
+            stored = (task.webhook_token or "") if task else ""
+            if not task or not stored or not secrets.compare_digest(str(stored), str(token)):
                 raise HTTPException(404, "Not found")
         finally:
             db.close()

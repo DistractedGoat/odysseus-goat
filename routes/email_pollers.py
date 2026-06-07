@@ -396,11 +396,15 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
 
                 if need_sum:
                     tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
+                    # Untrusted email body + attachments are wrapped so injected
+                    # instructions in the message can't redirect the summarizer.
+                    from src.prompt_security import untrusted_context_message
                     payload = {
                         "model": model,
                         "messages": [
                             {"role": "system", "content": "You are an email summarizer. Format: 1-3 short bullet points (use '- '). Cover: main point, action items, deadlines. If the email has attachments (marked '--- ATTACHMENTS ---'), USE THEIR CONTENTS — pull out invoice totals, deadlines, key clauses, any concrete numbers/dates in PDFs/docs, and reflect them in the bullets. Be terse.\n\nOUTPUT FORMAT: Put ONLY the bullet points between these exact markers, each on its own line:\n<<<SUMMARY>>>\n- ...\n<<<END>>>\nAny reasoning or planning must come BEFORE <<<SUMMARY>>> (ideally inside <think>...</think>). Only the text between the markers is kept."},
-                            {"role": "user", "content": f"From: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\n---\n\nSummarize the email. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
+                            untrusted_context_message(f"email from {sender}", f"Subject: {subject}\n\n{body_for_llm[:12000]}"),
+                            {"role": "user", "content": "Summarize the email shown above. Output the bullets between <<<SUMMARY>>> and <<<END>>>."},
                         ],
                         tok_key: 16384,
                         "temperature": 0.3,
@@ -457,11 +461,15 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                     if context_snippets:
                         sys_prompt += "\n\nRELEVANT CONTEXT FROM PAST EMAILS AND CONTACTS:\n" + "\n\n---\n\n".join(context_snippets[:5])
                     try:
+                        # Wrap the untrusted email body/attachments so a malicious
+                        # sender can't steer the auto-drafted reply.
+                        from src.prompt_security import untrusted_context_message
                         reply = await llm_call_async(
                             url=url, model=model,
                             messages=[
                                 {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": f"Original email:\nFrom: {sender}\nSubject: {subject}\n\n{body_for_llm[:12000]}\n\nDraft a reply. Return only the reply body text."},
+                                untrusted_context_message(f"email from {sender}", f"Subject: {subject}\n\n{body_for_llm[:12000]}"),
+                                {"role": "user", "content": "Draft a reply to the email shown above. Return only the reply body text."},
                             ],
                             temperature=0.7, max_tokens=1024,
                             headers=req_headers, timeout=90,
@@ -491,6 +499,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 # ── Calendar event extraction (independent of reply drafting) ──
                 if need_cal:
                     _cal_run_count = 0
+                    from src.prompt_security import untrusted_context_message
                     try:
                         # Pull a snapshot of upcoming events so the LLM can decide
                         # create vs update vs cancel based on what already exists.
@@ -544,11 +553,21 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                                     "- If no event-related content at all, return [].\n"
                                     "- No markdown fences, no prose, just the JSON array."
                                 )},
+                                # Untrusted email content is fenced in the shim;
+                                # EXISTING_EVENTS + folder context (server-derived,
+                                # trusted) and the instruction stay in plain
+                                # messages. Combined with the system-prompt warning
+                                # above, this is defense-in-depth for the one email
+                                # path that can autonomously WRITE to the calendar.
+                                untrusted_context_message(
+                                    f"email from {sender}",
+                                    f"Subject: {subject}\nDate: {msg.get('Date','')}\n\n{body[:4000]}",
+                                ),
                                 {"role": "user", "content": (
                                     f"EXISTING_EVENTS (next 60 days): {existing_json}\n\n"
-                                    f"EMAIL_FOLDER: {_folder} ({'sent by user' if is_sent else 'received'})\n"
-                                    f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date','')}\n\n"
-                                    f"{body[:4000]}"
+                                    f"EMAIL_FOLDER: {_folder} ({'sent by user' if is_sent else 'received'})\n\n"
+                                    "Decide the calendar operations for the email shown above. "
+                                    "Return ONLY the JSON array."
                                 )},
                             ],
                             temperature=0.1, max_tokens=16384,

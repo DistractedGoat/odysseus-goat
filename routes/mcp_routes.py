@@ -127,13 +127,22 @@ def setup_mcp_routes(mcp_manager: McpManager):
                     needs_oauth = _mcp_oauth_token_missing(oauth_cfg, strict=False)
                 disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
                 total_tools = status.get("tool_count", 0)
+                # env often holds secrets (API keys/tokens). Return only key
+                # names with a short masked hint so the admin can see what's
+                # configured without the raw value being echoed to the client
+                # (or any log/aggregator that captures the response).
+                _raw_env = json.loads(srv.env) if srv.env else {}
+                _masked_env = {
+                    k: (f"{str(v)[:2]}****" if v else "")
+                    for k, v in _raw_env.items()
+                }
                 result.append({
                     "id": srv.id,
                     "name": srv.name,
                     "transport": srv.transport,
                     "command": srv.command,
                     "args": json.loads(srv.args) if srv.args else [],
-                    "env": json.loads(srv.env) if srv.env else {},
+                    "env": _masked_env,
                     "url": srv.url,
                     "is_enabled": srv.is_enabled,
                     "status": status.get("status", "disconnected"),
@@ -196,8 +205,9 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 pass
         _apply_mcp_oauth_env(parsed_env, parsed_oauth_config)
 
-        # Write OAuth credentials file if provided (for Google MCP servers)
-        logger.info(f"MCP add_server: oauth_file={oauth_file!r}")
+        # Write OAuth credentials file if provided (for Google MCP servers).
+        # Do NOT log the value — it's JSON containing client_id/client_secret.
+        logger.info("MCP add_server: oauth_file %s", "provided" if oauth_file else "absent")
         if oauth_file:
             try:
                 oauth_data = json.loads(oauth_file)
