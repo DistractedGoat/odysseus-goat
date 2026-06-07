@@ -73,10 +73,40 @@ class SetOpenRegistrationRequest(BaseModel):
 SESSION_COOKIE = "odysseus_session"
 
 
+def _cookie_secure(request: Request) -> bool:
+    """Whether to set the Secure flag on the session cookie.
+
+    Honors an explicit ``SECURE_COOKIES=true``, but ALSO auto-enables Secure
+    whenever the request arrived over HTTPS (directly or via a trusted proxy's
+    ``X-Forwarded-Proto``). This keeps a cleartext session cookie from being
+    issued on an HTTPS deployment that forgot to set the env flag, while still
+    allowing plain-HTTP localhost development (where the flag stays off so the
+    cookie is accepted). Mirrors the is_https check in core/middleware.py.
+    """
+    if os.getenv("SECURE_COOKIES", "false").lower() == "true":
+        return True
+    try:
+        if request.url.scheme == "https":
+            return True
+        if request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https":
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     router = APIRouter(prefix="/api/auth", tags=["auth"])
 
     _login_limiter = RateLimiter(max_requests=15, window_seconds=60)
+    # Per-account brute-force lockout, keyed by username instead of IP, so a
+    # targeted account is protected even when the attacker rotates source IPs
+    # (the IP limiter above is per-IP and trivially bypassed by a botnet).
+    # Time-boxed: 10 failures within 15 min locks the account for the rest of
+    # the window; a successful login clears the counter. Tradeoff: an attacker
+    # can deliberately fail logins to lock out a known username for up to 15
+    # min — acceptable vs. unlimited password guessing.
+    _login_fail_limiter = RateLimiter(max_requests=10, window_seconds=900)
     _signup_limiter = RateLimiter(max_requests=3, window_seconds=300)
     _setup_limiter = RateLimiter(max_requests=3, window_seconds=300)
 
@@ -122,7 +152,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(429, "Too many requests — try again later")
         # Verify password first
         username = body.username.strip().lower()
+        # Per-account lockout: refuse further attempts once this username has
+        # accumulated too many recent failures, regardless of source IP.
+        if not _login_fail_limiter.peek(username):
+            raise HTTPException(429, "Too many failed attempts for this account — try again later")
         if not await asyncio.to_thread(auth_manager.verify_password, username, body.password):
+            _login_fail_limiter.check(username)  # record the failure
             raise HTTPException(401, "Invalid credentials")
         # Check 2FA if enabled
         if auth_manager.totp_enabled(username):
@@ -130,15 +165,17 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 # Password OK but need TOTP — tell client to show code input
                 return {"ok": False, "requires_totp": True, "username": username}
             if not auth_manager.totp_verify(username, body.totp_code):
+                _login_fail_limiter.check(username)  # record the failure
                 raise HTTPException(401, "Invalid 2FA code")
-        # All checks passed — create session (password already verified above)
+        # All checks passed — clear the failure counter, then create session
+        _login_fail_limiter.reset(username)
         token = await asyncio.to_thread(auth_manager.create_session_trusted, username)
         cookie_kwargs = dict(
             key=SESSION_COOKIE,
             value=token,
             httponly=True,
             samesite="lax",
-            secure=os.getenv("SECURE_COOKIES", "false").lower() == "true",
+            secure=_cookie_secure(request),
             path="/",
         )
         if body.remember:

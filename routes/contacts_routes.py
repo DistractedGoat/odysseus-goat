@@ -43,11 +43,14 @@ def _save_settings(settings):
 
 def _get_carddav_config():
     import os
+    from src.secret_storage import decrypt
     settings = _load_settings()
+    # Password is stored Fernet-encrypted in settings.json (decrypt() passes
+    # legacy plaintext and the env-var fallback through unchanged).
     return {
         "url": settings.get("carddav_url", os.environ.get("CARDDAV_URL", "")),
         "username": settings.get("carddav_username", os.environ.get("CARDDAV_USERNAME", "")),
-        "password": settings.get("carddav_password", os.environ.get("CARDDAV_PASSWORD", "")),
+        "password": decrypt(settings.get("carddav_password", os.environ.get("CARDDAV_PASSWORD", ""))),
     }
 
 
@@ -780,6 +783,14 @@ def setup_contacts_routes():
                         settings[key] = _validate_carddav_url(data[key])
                     except ValueError as e:
                         raise HTTPException(400, str(e))
+                elif key == "carddav_password":
+                    # get_config returns the password masked as "***"; treat an
+                    # unchanged mask as "leave it alone" so a settings re-save
+                    # doesn't clobber the real secret. Otherwise store encrypted.
+                    from src.secret_storage import encrypt
+                    pw = str(data[key] or "")
+                    if pw != "***":
+                        settings[key] = encrypt(pw)
                 else:
                     settings[key] = data[key]
         _save_settings(settings)

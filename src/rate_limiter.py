@@ -38,6 +38,23 @@ class RateLimiter:
             self._log[key] = timestamps
             return True
 
+    def peek(self, key: str) -> bool:
+        """Return True if a request WOULD be allowed right now, WITHOUT
+        recording it. Lets callers gate on a counter (e.g. failed-login
+        lockout) without consuming a slot on the happy path."""
+        now = time.monotonic()
+        with self._lock:
+            cutoff = now - self.window
+            timestamps = [t for t in self._log.get(key, []) if t > cutoff]
+            self._log[key] = timestamps
+            return len(timestamps) < self.max_requests
+
+    def reset(self, key: str) -> None:
+        """Clear a key's history (e.g. after a successful login) so prior
+        failures don't count against a now-legitimate user."""
+        with self._lock:
+            self._log.pop(key, None)
+
     def _maybe_cleanup(self, now: float) -> None:
         """Periodically purge stale entries."""
         if now - self._last_cleanup < self._cleanup_interval:

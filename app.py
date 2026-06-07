@@ -85,7 +85,16 @@ app = FastAPI(
 )
 
 # ========= CORS =========
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",")
+allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",") if o.strip()]
+# A wildcard origin combined with allow_credentials=True is invalid and unsafe:
+# it would let any site make credentialed cross-origin requests against the
+# authenticated API. Drop "*" (and fall back to loopback) rather than honor it.
+if "*" in allowed_origins:
+    logger.warning(
+        "ALLOWED_ORIGINS contained '*', which is unsafe with credentialed CORS — "
+        "ignoring it. Set explicit origins instead."
+    )
+    allowed_origins = [o for o in allowed_origins if o != "*"] or ["http://localhost", "http://127.0.0.1"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

@@ -91,5 +91,10 @@ def test_webhook_trigger_handler_still_validates_token():
     )
     with open(routes_path, encoding="utf-8") as fh:
         src = fh.read()
-    assert "ScheduledTask.webhook_token == token" in src
+    # The handler must still validate the path token against the task row and
+    # 404 on mismatch. The comparison is now constant-time (secrets.compare_digest
+    # on the stored webhook_token) rather than a SQL equality, so pin THAT
+    # property instead of the old `webhook_token == token` filter string.
+    assert "secrets.compare_digest" in src
+    assert "webhook_token" in src
     assert '@router.post("/{task_id}/webhook/{token}")' in src
